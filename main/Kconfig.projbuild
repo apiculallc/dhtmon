@@ -18,21 +18,15 @@ menu "ESP DHT Config"
         help
         Set the Maximum retry to avoid station reconnecting to the AP unlimited when the AP is really inexistent.
 
-    config APP_NET_HOST
-        string "rpc Hostname"
-        default "10.0.0.111"
+    config APP_MQTT_BROKER
+        string "mqtt broker"
+        default "mqtt://10.0.0.61:1883"
         help
-        gRPC server address.
+        MQTT broker url ( only plain text )
 
-    config APP_NET_PORT
-        string "rpc Port"
-        default 5321
-        help
-        gRPC server port.
-
-    config APP_NET_UUID
-        string "Devide UUID"
-        default "attic"
+    config APP_MQTT_TOPIC
+        string "MQTT topic name"
+        default "/home/sensor/masterbed"
         help
         Unique ID of the device.
 

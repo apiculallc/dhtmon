@@ -3,19 +3,20 @@ package main
 import (
 	"context"
 	"log"
-	"net"
 	"os"
+	"os/signal"
 	"strconv"
-	"sync"
+	"strings"
+	"syscall"
 	"time"
 
+	MQTT "github.com/eclipse/paho.mqtt.golang"
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 )
 
 const (
-	DATASIZE = 100
-	BUCKET   = "dhtmon"
-	ORG      = "home"
+	BUCKET = "dhtmon"
+	ORG    = "home"
 )
 
 var resp = []byte("OK")
@@ -27,18 +28,6 @@ func envStr(name, def string) string {
 		return def
 	}
 }
-func envInt(name string, def int) int {
-	if v, ok := os.LookupEnv(name); ok {
-		if x, err := strconv.Atoi(v); err != nil {
-			return def
-		} else {
-			return x
-		}
-	} else {
-		return def
-	}
-}
-
 func setup(client influxdb2.Client) error {
 	ctx, c := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer c()
@@ -59,61 +48,67 @@ func setup(client influxdb2.Client) error {
 	return nil
 }
 
+func extractTopicId(t string) string {
+	// topic is of format: /home/sensor/masterbed/xxx/yyy
+	if e := strings.LastIndex(t, "/"); e > 0 {
+		if s := strings.LastIndex(t[:e-1], "/"); s > -1 {
+			return t[s+1 : e]
+		}
+	}
+	return ""
+}
+
 func main() {
-	host := envStr("APP_HOST", "0.0.0.0")
-	port := envInt("APP_PORT", 6543)
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGKILL)
+	broker := envStr("APP_MQTT_BROKER", "mqtt://10.0.0.61:1883")
+	opts := MQTT.NewClientOptions()
+	opts.AddBroker(broker)
 	db := envStr("INFLUX_DB", "http://localhost:8086")
 	println("DB", db)
 	token := envStr("INFLUX_TOKEN", "xyz")
 	println("TOKEN", token)
-	l, err := net.Listen("tcp", host+":"+strconv.Itoa(port))
-	if err != nil {
-		log.Fatal(err)
-	}
-	dp := sync.Pool{
-		New: func() interface{} { return make([]byte, DATASIZE) },
-	}
-	log.Printf("Listening on %s:%d", host, port)
 	client := influxdb2.NewClient(db, token)
 	defer client.Close()
 	if err := setup(client); err != nil {
 		log.Fatal("can't init InfluxDB", err)
 	}
 	writeAPI := client.WriteAPIBlocking(ORG, BUCKET)
-	for {
-		s, err := l.Accept()
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		r := dp.Get().([]byte)
-		data, err := s.Read(r)
-		if err != nil {
-			s.Close()
-			log.Println(err)
-			continue
-		}
-		if data <= 5 {
-			s.Close()
-			continue
-		}
-		log.Printf("%d:%d:%d:%d", r[0], r[1], r[2], r[3])
-		temp := float32(int16(r[0])|int16(r[1])<<8) / 10.0
-		humid := float32(int16(r[2])|int16(r[3])<<8) / 10.0
-		uuid := string(r[5 : 5+r[4]-1])
-		log.Printf("[%s]: Temperature: %.2f C, humidity %.2f%%", uuid, temp, humid)
-		data, err = s.Write(resp)
-		if data != len(resp) {
-			log.Printf("wrote %d bytes", data)
-		}
-		s.Close()
-		p := influxdb2.NewPoint("temphumid", map[string]string{"sensor": uuid}, map[string]interface{}{"temp": temp, "humid": humid}, time.Now())
-		go func() {
-			dl, c := context.WithTimeout(context.Background(), 1*time.Second)
-			defer c()
-			if err := writeAPI.WritePoint(dl, p); err != nil {
-				log.Printf("can't store data: %v", err)
+	var onReceive = func(metric string) func(MQTT.Client, MQTT.Message) {
+		return func(client MQTT.Client, msg MQTT.Message) {
+			if uuid := extractTopicId(msg.Topic()); uuid != "" {
+				pld := string(msg.Payload())
+				v, err := strconv.ParseFloat(pld, 32)
+				if err != nil {
+					log.Println("can't parse ", pld, err)
+					return
+				}
+				p := influxdb2.NewPoint("temphumid", map[string]string{"sensor": uuid}, map[string]interface{}{metric: v}, time.Now())
+				go func() {
+					dl, c := context.WithTimeout(context.Background(), 1*time.Second)
+					defer c()
+					if err := writeAPI.WritePoint(dl, p); err != nil {
+						log.Printf("can't store data: %v", err)
+					}
+				}()
+			} else {
+				log.Println("can't extract topic id from ", msg.Topic())
 			}
-		}()
+		}
 	}
+	opts.OnConnect = func(c MQTT.Client) {
+		if token := c.Subscribe("/home/sensor/+/temp", 1, onReceive("temp")); token.Wait() && token.Error() != nil {
+			panic(token.Error())
+		}
+		if token := c.Subscribe("/home/sensor/+/humid", 1, onReceive("humid")); token.Wait() && token.Error() != nil {
+			panic(token.Error())
+		}
+	}
+	mqttClient := MQTT.NewClient(opts)
+	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
+		log.Fatal(token.Error())
+	}
+	defer mqttClient.Disconnect(0)
+	log.Println("started processing topics")
+	<-c
 }

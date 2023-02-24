@@ -11,6 +11,7 @@
 #include "event_groups.h"
 #include "esp_task_wdt.h"
 #include <stdbool.h>
+#include <mqtt_client.h>
 #include "driver/gpio.h"
 
 #define WAIT_CONNECT (5000)
@@ -27,13 +28,15 @@
 static int s_retry_num = 0;
 static const dht_sensor_type_t sensor_type = DHT_TYPE_AM2301;
 //static const dht_sensor_type_t sensor_type = DHT_TYPE_DHT11;
-static const gpio_num_t dht_gpio = 4;
+static const gpio_num_t dht_gpio = 5;
+//static const gpio_num_t dht_gpio = 4;
 const char *endpoint;
 static EventGroupHandle_t wifi_event_group;
 const struct timeval socket_timeout = {
         .tv_sec = 5,
         .tv_usec = 0
 };
+struct esp_mqtt_client *mqtt_client;
 
 static void unified_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
@@ -141,95 +144,29 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
         ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC\n", humidity / 10, temperature / 10);
     } else {
         printf("Could not read data from sensor\n");
+        return;
     }
-    const struct addrinfo hints = {
-            .ai_family = AF_INET,
-            .ai_socktype = SOCK_STREAM,
-    };
-    struct addrinfo *res;
-    struct in_addr *addr;
-    static char host[255] = CONFIG_APP_NET_HOST;
-    static char port[6] = CONFIG_APP_NET_PORT; // 0 - 65535
-    static char uuid[] = CONFIG_APP_NET_UUID; // device ID
+    static char temp[] = CONFIG_APP_MQTT_TOPIC"/temp"; // temperature
+    static char humid[] = CONFIG_APP_MQTT_TOPIC"/humid"; // humidity
 
-    static uint8_t buf[4 + (sizeof uuid) + 1];
-    buf[4] = sizeof uuid;
-    memcpy(&buf[5], uuid, sizeof uuid);
     int try = 0;
     for (; try < SEND_RETRIES; try++) {
         ESP_LOGI(TAG, "SENDING DATA ATTEMPT %d", try);
-        int err = getaddrinfo(host, port, &hints, &res);
-        if (err != 0 || res == NULL) {
-            freeaddrinfo(res);
-            ESP_LOGE(TAG, "DNS lookup failed err=%d res=%p", errno, res);
-            vTaskDelay(pdMS_TO_TICKS(SEND_RETRY_INTERVAL_MS));
+        static char buf[10];
+        memset(buf, 0, sizeof buf);
+        int sz = sprintf(buf, "%d", temperature / 10);
+        int ret = esp_mqtt_client_publish(mqtt_client, temp, buf,
+                                          sz, 1, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "can't send temperature to %s => %d", temp, ret);
             continue;
         }
-
-        uint16_t dstPort = ntohs(*(&((struct sockaddr_in *) res->ai_addr)->sin_port));
-
-        addr = &((struct sockaddr_in *) res->ai_addr)->sin_addr;
-        ESP_LOGI(TAG, "DNS lookup succeeded. IP=%s", inet_ntoa(*addr));
-
-        int sndrSocket = socket(res->ai_family, res->ai_socktype, IPPROTO_TCP);
-        if (sndrSocket < 0) {
-            ESP_LOGE(TAG, "error opening socket to %s : %hu -> %d, %d", inet_ntoa(*addr), dstPort, sndrSocket,
-                     errno);
-            vTaskDelay(pdMS_TO_TICKS(SEND_RETRY_INTERVAL_MS));
+        sz = sprintf(buf, "%d", temperature / 10);
+        ret = esp_mqtt_client_publish(mqtt_client, humid, buf,
+                                      sz, 1, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "can't send temperature to %s => %d", temp, ret);
             continue;
-        }
-        if ((setsockopt(sndrSocket, SOL_SOCKET, SO_RCVTIMEO, &socket_timeout,
-                        sizeof socket_timeout)) < 0) {
-            ESP_LOGE(TAG, "can't set receive timeout: %d", errno);
-        }
-
-        if (setsockopt(sndrSocket, SOL_SOCKET, SO_SNDTIMEO, &socket_timeout,
-                       sizeof socket_timeout) < 0) {
-            ESP_LOGE(TAG, "can't set send timeout: %d", errno);
-        }
-        err = connect(sndrSocket, res->ai_addr, res->ai_addrlen);
-        if (err != 0) {
-            ESP_LOGE(TAG, "error connecting to %s : %hu -> %d : %d", inet_ntoa(*addr), dstPort, sndrSocket, errno);
-            if (sndrSocket != -1) {
-                close(sndrSocket);
-            }
-            vTaskDelay(pdMS_TO_TICKS(SEND_RETRY_INTERVAL_MS));
-            continue;
-        }
-        buf[0] = temperature & 0xff;
-        buf[1] = (temperature >> 8) & 0xff;
-        buf[2] = humidity & 0xff;
-        buf[3] = (humidity >> 8) & 0xff;
-        ESP_LOGI(TAG, "data: %d:%d:%d:%d", buf[0], buf[1], buf[2], buf[3]);
-
-        err = send(sndrSocket, buf, sizeof buf, 0);
-        if (err < 0) {
-            ESP_LOGE(TAG, "can't send data to socket %d", errno);
-            if (sndrSocket != -1) {
-                close(sndrSocket);
-            }
-            vTaskDelay(pdMS_TO_TICKS(SEND_RETRY_INTERVAL_MS));
-            continue;
-        } else {
-            ESP_LOGI(TAG, "WRITE : %d : '%s'", err, buf);
-        }
-
-        static char buf[3];
-        memset(buf, 0, 3);
-        err = recv(sndrSocket, buf, 2, 0);
-        if (err < 0) {
-            ESP_LOGE(TAG, "can't read data from socket %d", errno);
-            if (sndrSocket != -1) {
-                close(sndrSocket);
-            }
-            vTaskDelay(pdMS_TO_TICKS(SEND_RETRY_INTERVAL_MS));
-            continue;
-        } else {
-            ESP_LOGI(TAG, "READ : %d : '%s'", err, buf);
-        }
-
-        if (sndrSocket != -1) {
-            close(sndrSocket);
         }
         try = SEND_RETRIES + 1;
     }
@@ -272,6 +209,12 @@ void app_main() {
     if (!connected) {
         esp_restart();
     }
+    esp_mqtt_client_config_t mqtt_cfg = {
+            .uri = CONFIG_APP_MQTT_BROKER,
+    };
+    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    ESP_ERROR_CHECK(esp_mqtt_client_start(mqtt_client));
+
     gpio_config_t conf = {
             .pin_bit_mask = (1 << BUILTIN_LED),
             .mode = GPIO_MODE_DEF_OUTPUT,
