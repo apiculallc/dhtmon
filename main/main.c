@@ -154,14 +154,14 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
         ESP_LOGI(TAG, "SENDING DATA ATTEMPT %d", try);
         static char buf[10];
         memset(buf, 0, sizeof buf);
-        int sz = sprintf(buf, "%d", temperature / 10);
+        int sz = sprintf(buf, "%.2f", temperature / 10.0);
         int ret = esp_mqtt_client_publish(mqtt_client, temp, buf,
                                           sz, 1, 0);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "can't send temperature to %s => %d", temp, ret);
             continue;
         }
-        sz = sprintf(buf, "%d", temperature / 10);
+        sz = sprintf(buf, "%.2f", temperature / 10.0);
         ret = esp_mqtt_client_publish(mqtt_client, humid, buf,
                                       sz, 1, 0);
         if (ret != ESP_OK) {
