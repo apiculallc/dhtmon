@@ -3,8 +3,6 @@
 #include <freertos/task.h>
 #include <dht.h>
 #include "lwip/err.h"
-#include "lwip/netdb.h"
-#include "lwip/sockets.h"
 #include "esp_event.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
@@ -15,17 +13,13 @@
 #include "driver/gpio.h"
 
 #define WAIT_CONNECT (5000)
-#define WIFI_CONNECT_RETRIES (10)
-#define WIFI_CONNECT_RETRY_DELAY_MS (10000)
 #define TAG "DHT_MONITOR"
 #define SEND_RETRIES (5)
 #define SEND_RETRY_INTERVAL_MS (5000)
 #define REPORT_INTERVAL_MS (SEND_RETRIES * SEND_RETRY_INTERVAL_MS + 100)
 #define WIFI_CONNECTED_BIT     BIT0
-#define WIFI_FAIL_BIT          BIT1
 #define BUILTIN_LED GPIO_NUM_2
 
-static int s_retry_num = 0;
 static const dht_sensor_type_t sensor_type = DHT_TYPE_AM2301;
 //static const dht_sensor_type_t sensor_type = DHT_TYPE_DHT11;
 static const gpio_num_t dht_gpio = 5;
@@ -42,30 +36,16 @@ static void unified_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT) {
         ESP_LOGD(TAG, "WIFI_EVENT: %d", event_id);
-        switch (event_id) {
-            case WIFI_EVENT_STA_DISCONNECTED:
-                if (s_retry_num < CONFIG_ESP_MAXIMUM_RETRY) {
-                    ESP_LOGI(TAG, "retrying AP connection");
-                    s_retry_num++;
-                    esp_wifi_connect();
-                    xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
-                } else {
-                    // reboot ESP as we're likely have issues with connecting
-                    esp_restart();
-                }
-                ESP_LOGI(TAG, "AP disconnected");
-                break;
+        if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            // restart if the connection is dropped
+            esp_restart();
         }
     } else if (event_base == IP_EVENT) {
         ESP_LOGD(TAG, "IP_EVENT: %d", event_id);
-        ip_event_got_ip_t *event;
-        switch (event_id) {
-            case IP_EVENT_STA_GOT_IP:
-                event = (ip_event_got_ip_t *) event_data;
-                ESP_LOGI(TAG, "got ip: %s", ip4addr_ntoa((const ip4_addr_t *) &event->ip_info.ip));
-                s_retry_num = 0;
-                xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
-                break;
+        if (event_id == IP_EVENT_STA_GOT_IP) {
+            ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
+            ESP_LOGI(TAG, "got ip: %s", ip4addr_ntoa((const ip4_addr_t *) &event->ip_info.ip));
+            xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
         }
     }
 }
@@ -87,7 +67,6 @@ static bool connect_wifi() {
         }
     }
 
-    s_retry_num = 0;
     ESP_LOGI(TAG, "entering station mode...");
 
     wifi_config_t wifi_config = {
@@ -112,7 +91,7 @@ static bool connect_wifi() {
     /* Waiting until either the connection is established (WIFI_CONNECTED_BIT) or connection failed for the maximum
      * number of re-tries (WIFI_FAIL_BIT). The bits are set by event_handler() (see above) */
     EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                           WIFI_CONNECTED_BIT,
                                            pdTRUE,
                                            pdFALSE,
                                            pdMS_TO_TICKS(WAIT_CONNECT));
@@ -120,8 +99,6 @@ static bool connect_wifi() {
      * happened. */
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "connected to ap SSID:%s", CONFIG_ESP_WIFI_SSID);
-    } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Failed to connect to SSID:%s", CONFIG_ESP_WIFI_SSID);
     } else {
         ESP_LOGE(TAG, "NEITHER WIFI_CONNECTED_BIT NOR WIFI_FAIL_BIT ARE SET");
     }
@@ -138,12 +115,11 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
     // pull-up resistors on the data pin.  It is recommended
     // to provide an external pull-up resistor otherwise...
 
-    gpio_set_pull_mode(dht_gpio, GPIO_PULLUP_ONLY);
 
     if (dht_read_data(sensor_type, dht_gpio, &humidity, &temperature) == ESP_OK) {
-        ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC\n", humidity / 10, temperature / 10);
+        ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC", humidity / 10, temperature / 10);
     } else {
-        printf("Could not read data from sensor\n");
+        ESP_LOGE(TAG, "Could not read data from sensor");
         return;
     }
     static char temp[] = CONFIG_APP_MQTT_TOPIC"/temp"; // temperature
@@ -152,20 +128,24 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
     int try = 0;
     for (; try < SEND_RETRIES; try++) {
         ESP_LOGI(TAG, "SENDING DATA ATTEMPT %d", try);
-        static char buf[10];
-        memset(buf, 0, sizeof buf);
-        int sz = sprintf(buf, "%.2f", temperature / 10.0);
+#define bufSz 10
+        static char buf[bufSz];
+        int sz = snprintf(buf, bufSz, "%d.%d", temperature / 10, temperature % 10);
+        ESP_LOGI(TAG, "sending temp: '%s'", buf);
         int ret = esp_mqtt_client_publish(mqtt_client, temp, buf,
                                           sz, 1, 0);
-        if (ret != ESP_OK) {
+        if (ret < 0) {
             ESP_LOGE(TAG, "can't send temperature to %s => %d", temp, ret);
+            vTaskDelay(SEND_RETRY_INTERVAL_MS);
             continue;
         }
-        sz = sprintf(buf, "%.2f", temperature / 10.0);
+        sz = sprintf(buf, "%d.%d", humidity / 10, humidity % 10);
+        ESP_LOGI(TAG, "sending humidity: '%s'", buf);
         ret = esp_mqtt_client_publish(mqtt_client, humid, buf,
                                       sz, 1, 0);
-        if (ret != ESP_OK) {
+        if (ret < 0) {
             ESP_LOGE(TAG, "can't send temperature to %s => %d", temp, ret);
+            vTaskDelay(SEND_RETRY_INTERVAL_MS);
             continue;
         }
         try = SEND_RETRIES + 1;
@@ -195,18 +175,9 @@ void app_main() {
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_LOGI(TAG, "create custom event handler");
     wifi_event_group = xEventGroupCreate();
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &unified_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &unified_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &unified_event_handler, NULL));
-    bool connected = false;
-    for (int i = 0; i < WIFI_CONNECT_RETRIES; i++) {
-        connected = connect_wifi();
-        if (connected) {
-            break;
-        }
-        ESP_LOGE(TAG, "can't connect to AP " CONFIG_ESP_WIFI_SSID);
-        vTaskDelay(pdMS_TO_TICKS(WIFI_CONNECT_RETRY_DELAY_MS));
-    }
-    if (!connected) {
+    if (!connect_wifi()) {
         esp_restart();
     }
     esp_mqtt_client_config_t mqtt_cfg = {
@@ -223,7 +194,9 @@ void app_main() {
             .intr_type = GPIO_INTR_DISABLE
     };
     ESP_ERROR_CHECK(gpio_config(&conf));
-    TimerHandle_t timerChannel = xTimerCreate("ChannelSwitch",
+    gpio_set_level(BUILTIN_LED, 1);
+    gpio_set_pull_mode(dht_gpio, GPIO_PULLUP_ONLY);
+    TimerHandle_t timerChannel = xTimerCreate("DHT_READ",
                                               (pdMS_TO_TICKS(REPORT_INTERVAL_MS)),
                                               pdTRUE,
                                               (void *) 1,
@@ -231,6 +204,7 @@ void app_main() {
     );
     assert(timerChannel);
     assert(xTimerStart(timerChannel, 0) == pdPASS);
+    gpio_set_level(BUILTIN_LED, 0);
+    sleep(1);
     gpio_set_level(BUILTIN_LED, 1);
 }
-
