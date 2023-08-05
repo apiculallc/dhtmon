@@ -1,0 +1,74 @@
+<html>
+<head>
+    <style>
+        .object-wrapper {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .object-div {
+            max-width: 550px;
+            width: 100%;
+            border: thin dotted aqua;
+        }
+
+        .object {
+            padding: 20px;
+            display: inline-block;
+            width: 100%;
+            text-align: center;
+        }
+
+        form {
+            position: relative;
+            width: 90%;
+            text-align: right;
+        }
+
+        form div {
+            padding-top: 1pt;
+            padding-bottom: 1pt;
+        }
+
+        label {
+            width: 30%;
+            position: absolute;
+            left: 10%;
+            text-align: right;
+            margin-right: 30px;
+        }
+    </style>
+</head>
+<body>
+<div class="object-wrapper">
+    <!-- Place any object -->
+    <div class="object-div">
+        <div class="object">
+            <form method="post" action="/update">
+                <div>
+                    <label for="ssid">AP SSID</label>
+                    <input id="ssid" name="ssid" type="text"/>
+                </div>
+                <div>
+                    <label for="password">AP password</label>
+                    <input id="password" name="password" type="password"/>
+                </div>
+                <div>
+                    <label for="password_rep">Repeat password</label>
+                    <input id="password_rep" name="password_rep" type="password"/>
+                </div>
+                <div>
+                    <label for="location">Sensor location</label>
+                    <input id="location" name="location" type="text" value=""/>
+                </div>
+                <div>
+                    <input type="submit" value="Save"/>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+</body>
+</html>

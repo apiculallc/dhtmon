@@ -19,8 +19,6 @@ const (
 	ORG    = "home"
 )
 
-var resp = []byte("OK")
-
 func envStr(name, def string) string {
 	if v, ok := os.LookupEnv(name); ok {
 		return v
@@ -28,6 +26,7 @@ func envStr(name, def string) string {
 		return def
 	}
 }
+
 func setup(client influxdb2.Client) error {
 	ctx, c := context.WithTimeout(context.TODO(), 5*time.Second)
 	defer c()

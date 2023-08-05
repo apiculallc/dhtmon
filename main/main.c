@@ -1,3 +1,5 @@
+#include <esp_types.h>
+#include <sys/cdefs.h>
 #include <stdio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -10,7 +12,11 @@
 #include "esp_task_wdt.h"
 #include <stdbool.h>
 #include <mqtt_client.h>
+#include <nvs_flash.h>
+#include <esp_timer.h>
 #include "driver/gpio.h"
+#include "accesspoint.h"
+#include "flash_config.h"
 
 #define WAIT_CONNECT (5000)
 #define TAG "DHT_MONITOR"
@@ -18,12 +24,15 @@
 #define SEND_RETRY_INTERVAL_MS (5000)
 #define REPORT_INTERVAL_MS (SEND_RETRIES * SEND_RETRY_INTERVAL_MS + 100)
 #define WIFI_CONNECTED_BIT     BIT0
-#define BUILTIN_LED GPIO_NUM_2
+#define MAX_SENSOR_READ_TRIES 3
+
+struct ConfigData app_config;
 
 static const dht_sensor_type_t sensor_type = DHT_TYPE_AM2301;
 //static const dht_sensor_type_t sensor_type = DHT_TYPE_DHT11;
-static const gpio_num_t dht_gpio = 5;
-//static const gpio_num_t dht_gpio = 4;
+#define BTN_MODE GPIO_NUM_4
+static const gpio_num_t dht_gpio_arr[] = {GPIO_NUM_4, GPIO_NUM_5};
+static gpio_num_t dht_gpio;
 const char *endpoint;
 static EventGroupHandle_t wifi_event_group;
 const struct timeval socket_timeout = {
@@ -32,12 +41,16 @@ const struct timeval socket_timeout = {
 };
 struct esp_mqtt_client *mqtt_client;
 
+static char *temp; // temperature
+static char *humid; // humidity
+
 static void unified_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT) {
         ESP_LOGD(TAG, "WIFI_EVENT: %d", event_id);
         if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             // restart if the connection is dropped
+            ESP_LOGE(TAG, "can't connect to wifi");
             esp_restart();
         }
     } else if (event_base == IP_EVENT) {
@@ -69,21 +82,11 @@ static bool connect_wifi() {
 
     ESP_LOGI(TAG, "entering station mode...");
 
-    wifi_config_t wifi_config = {
-            .sta = {
-                    .ssid = CONFIG_ESP_WIFI_SSID,
-                    .password = CONFIG_ESP_WIFI_PASS
-            },
-    };
-
-    /* Setting a password implies station will connect to all security modes including WEP/WPA.
-     * However these modes are deprecated and not advisable to be used. Incase your Access point
-     * doesn't support WPA2, these mode can be enabled by commenting below line */
-    if (strlen((char *) wifi_config.sta.password)) {
-        wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    if (strlen((char *) app_config.wifi_config.sta.password)) {
+        app_config.wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     }
 
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &app_config.wifi_config));
     ESP_ERROR_CHECK(esp_wifi_connect());
 
     ESP_LOGI(TAG, "waiting for wifi connection");
@@ -98,13 +101,12 @@ static bool connect_wifi() {
     /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
      * happened. */
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "connected to ap SSID:%s", CONFIG_ESP_WIFI_SSID);
+        ESP_LOGI(TAG, "connected to ap SSID:%s", app_config.wifi_config.sta.ssid);
     } else {
         ESP_LOGE(TAG, "NEITHER WIFI_CONNECTED_BIT NOR WIFI_FAIL_BIT ARE SET");
     }
     return bits & WIFI_CONNECTED_BIT;
 }
-
 
 void report_temp_humidity(TimerHandle_t pxTimer) {
     ESP_LOGD(TAG, "TIMER TASK");
@@ -115,15 +117,17 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
     // pull-up resistors on the data pin.  It is recommended
     // to provide an external pull-up resistor otherwise...
 
-
+    int8_t sensor_read_attempts = 0;
     if (dht_read_data(sensor_type, dht_gpio, &humidity, &temperature) == ESP_OK) {
         ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC", humidity / 10, temperature / 10);
     } else {
         ESP_LOGE(TAG, "Could not read data from sensor");
+        sensor_read_attempts++;
+        if (sensor_read_attempts > MAX_SENSOR_READ_TRIES) {
+            esp_restart();
+        }
         return;
     }
-    static char temp[] = CONFIG_APP_MQTT_TOPIC"/temp"; // temperature
-    static char humid[] = CONFIG_APP_MQTT_TOPIC"/humid"; // humidity
 
     int try = 0;
     for (; try < SEND_RETRIES; try++) {
@@ -159,9 +163,10 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
         vTaskDelay(pdMS_TO_TICKS(250));
         gpio_set_level(BUILTIN_LED, 1);
     }
+    esp_task_wdt_reset();
 }
 
-void app_main() {
+void read_dht_mainloop() {
     ESP_LOGI(TAG, "init tcp/ip stack");
     tcpip_adapter_init();
     ESP_LOGI(TAG, "create default loop");
@@ -181,10 +186,105 @@ void app_main() {
         esp_restart();
     }
     esp_mqtt_client_config_t mqtt_cfg = {
-            .uri = CONFIG_APP_MQTT_BROKER,
+            .uri = app_config.network.mqtt_uri,
     };
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     ESP_ERROR_CHECK(esp_mqtt_client_start(mqtt_client));
+
+    ESP_LOGI(TAG, "init WDT");
+    ESP_ERROR_CHECK(esp_task_wdt_init());
+    TimerHandle_t timerChannel = xTimerCreate("DHT_READ",
+                                              (pdMS_TO_TICKS(REPORT_INTERVAL_MS)),
+                                              pdTRUE,
+                                              (void *) 1,
+                                              report_temp_humidity
+    );
+    assert(timerChannel);
+    assert(xTimerStart(timerChannel, 0) == pdPASS);
+
+}
+
+_Noreturn void display_error() {
+    for (;;) {
+        gpio_set_level(BUILTIN_LED, 0);
+        sleep(1);
+        gpio_set_level(BUILTIN_LED, 1);
+        sleep(1);
+    }
+}
+
+static xQueueHandle gpio_evt_queue = NULL;
+static int64_t latest_btn_event;
+const int short_press = 1000;
+static bool armed = false;
+static int64_t evt;
+
+/**
+ * The GPIO event handler that will trigger and send the event to the queue once falling edge is detected and current
+ * GPIO status is "low"
+ */
+void btnPressHandler(void *arg) {
+    if (gpio_get_level(BTN_MODE) == 0) {
+        evt = esp_timer_get_time();
+        xQueueSendFromISR(gpio_evt_queue, &evt, NULL);
+    }
+}
+
+/*
+ * The task that is being triggered "async" to confirm that UUID was set.
+ */
+static void uuid_set_blinker(void *arg) {
+    for (int i = 0; i <= 5; i++) {
+        gpio_set_level(BUILTIN_LED, 0);
+        sleep(1);
+        gpio_set_level(BUILTIN_LED, 1);
+        sleep(1);
+    }
+    armed = false;
+}
+
+/**
+ * The event handler for GPIO.
+ */
+static void gpio_event_task(void *arg) {
+    int64_t evt_time;
+    for (;;) {
+        if (xQueueReceive(gpio_evt_queue, &evt_time, pdMS_TO_TICKS(1000))) {
+            ESP_LOGD(TAG, "button pressed");
+            if ((evt_time - latest_btn_event) / 1000 > short_press) {
+                latest_btn_event = evt_time;
+                if (!armed) {
+                    armed = true;
+                    continue;
+                }
+                xTaskCreate(uuid_set_blinker, "uuid blinker set", 1024, NULL, 10, NULL);
+            }
+        }
+    }
+}
+
+
+void app_main() {
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        display_error();
+    }
+    ESP_ERROR_CHECK(ret);
+    // Reads the various configuration parameters into the application config from NVS.
+    ESP_LOGI(TAG, "Reading configuration");
+    ret = read_app_config(&app_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Can't read config: %s", esp_err_to_name(ret));
+        display_error();
+    }
+
+    temp = malloc(sizeof(CONFIG_APP_MQTT_TOPIC"/temp") + strlen(app_config.location) - 1);
+    humid = malloc(sizeof(CONFIG_APP_MQTT_TOPIC"/humid") + strlen(app_config.location) - 1);
+
+    sprintf(temp, CONFIG_APP_MQTT_TOPIC"/temp", app_config.location);
+    sprintf(humid, CONFIG_APP_MQTT_TOPIC"/humid", app_config.location);
+
+    ESP_LOGI(TAG, "temp: '%s';\nhumid: '%s'", temp, humid);
 
     gpio_config_t conf = {
             .pin_bit_mask = (1 << BUILTIN_LED),
@@ -195,16 +295,51 @@ void app_main() {
     };
     ESP_ERROR_CHECK(gpio_config(&conf));
     gpio_set_level(BUILTIN_LED, 1);
-    gpio_set_pull_mode(dht_gpio, GPIO_PULLUP_ONLY);
-    TimerHandle_t timerChannel = xTimerCreate("DHT_READ",
-                                              (pdMS_TO_TICKS(REPORT_INTERVAL_MS)),
-                                              pdTRUE,
-                                              (void *) 1,
-                                              report_temp_humidity
-    );
-    assert(timerChannel);
-    assert(xTimerStart(timerChannel, 0) == pdPASS);
-    gpio_set_level(BUILTIN_LED, 0);
-    sleep(1);
-    gpio_set_level(BUILTIN_LED, 1);
+    bool gpioFound = false;
+    for (int sensorIdx = 0; !gpioFound && sensorIdx < sizeof(dht_gpio_arr) / sizeof(gpio_num_t); sensorIdx++) {
+        dht_gpio = dht_gpio_arr[sensorIdx];
+        ESP_LOGI(TAG, "reading GPIO %d", dht_gpio);
+        ESP_ERROR_CHECK(gpio_set_pull_mode(dht_gpio, GPIO_PULLUP_ONLY))
+        int16_t humidity, temperature;
+        for (int try = 0; try < 3 && !gpioFound; try++) {
+            if (dht_read_data(sensor_type, dht_gpio, &humidity, &temperature) == ESP_OK) {
+                ESP_LOGI(TAG, "found DHT GPIO %d", dht_gpio);
+                gpioFound = true;
+                ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC", humidity / 10, temperature / 10);
+                gpio_set_level(BUILTIN_LED, 0);
+                sleep(1);
+                gpio_set_level(BUILTIN_LED, 1);
+            } else {
+                ESP_LOGW(TAG, "can't read GPIO %d, sleeping", dht_gpio);
+                sleep(2);
+            }
+        }
+    }
+    // if we can't read data - no point of connecting to a wifi.
+
+    if (!gpioFound) {
+        ESP_LOGE(TAG, "can't read DHT");
+        display_error();
+    }
+
+    gpio_set_pull_mode(BTN_MODE, GPIO_PULLUP_ONLY);
+    if (gpio_get_level(BTN_MODE) == 0) {
+        if (startAp(&app_config) != 0) {
+            display_error();
+        }
+        gpio_set_level(BUILTIN_LED, 0);
+    } else {
+        read_dht_mainloop();
+    }
+
+    gpio_set_intr_type(BTN_MODE, GPIO_INTR_LOW_LEVEL);
+    // create a queue to process GPIO tasks
+    gpio_evt_queue = xQueueCreate(5, sizeof(uint32_t));
+    // poll events from the gpio_evt_queue and run processing outside of the IRQ event loop.
+    xTaskCreate(gpio_event_task, "btn event handler", 2048, NULL, 10, NULL);
+
+    // Register IRQ for the control button press events
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+
+    gpio_isr_handler_add(BTN_MODE, &btnPressHandler, NULL);
 }

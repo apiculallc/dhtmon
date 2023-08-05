@@ -1,0 +1,9 @@
+key,type,encoding,value
+app_config,namespace,,
+wifi_ssid,data,string,SSID
+wifi_password,data,string,PASSWORD
+app_location,data,string,test
+app_mqtt_url,data,string,mqtt://10.0.0.61:1883
+web_config,namespace,,
+index.html,file,binary,web/index.html
+done.html,file,binary,web/done.html
