@@ -1,4 +1,3 @@
-#include <esp_types.h>
 #include <sys/cdefs.h>
 #include <stdio.h>
 #include <freertos/FreeRTOS.h>
@@ -9,11 +8,11 @@
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "event_groups.h"
-#include "esp_task_wdt.h"
 #include <stdbool.h>
 #include <mqtt_client.h>
 #include <nvs_flash.h>
 #include <esp_timer.h>
+#include <esp_task_wdt.h>
 #include "driver/gpio.h"
 #include "accesspoint.h"
 #include "flash_config.h"
@@ -30,15 +29,11 @@ struct ConfigData app_config;
 
 static const dht_sensor_type_t sensor_type = DHT_TYPE_AM2301;
 //static const dht_sensor_type_t sensor_type = DHT_TYPE_DHT11;
-#define BTN_MODE GPIO_NUM_4
-static const gpio_num_t dht_gpio_arr[] = {GPIO_NUM_4, GPIO_NUM_5};
-static gpio_num_t dht_gpio;
+static const gpio_num_t dht_sensor_arr[] = {GPIO_NUM_4, GPIO_NUM_5};
+static const gpio_num_t dht_btn_arr[] = {GPIO_NUM_5, GPIO_NUM_4};
+static gpio_num_t dht_sensor, dht_btn;
 const char *endpoint;
 static EventGroupHandle_t wifi_event_group;
-const struct timeval socket_timeout = {
-        .tv_sec = 5,
-        .tv_usec = 0
-};
 struct esp_mqtt_client *mqtt_client;
 
 static char *temp; // temperature
@@ -118,7 +113,7 @@ void report_temp_humidity(TimerHandle_t pxTimer) {
     // to provide an external pull-up resistor otherwise...
 
     int8_t sensor_read_attempts = 0;
-    if (dht_read_data(sensor_type, dht_gpio, &humidity, &temperature) == ESP_OK) {
+    if (dht_read_data(sensor_type, dht_sensor, &humidity, &temperature) == ESP_OK) {
         ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC", humidity / 10, temperature / 10);
     } else {
         ESP_LOGE(TAG, "Could not read data from sensor");
@@ -224,7 +219,7 @@ static int64_t evt;
  * GPIO status is "low"
  */
 void btnPressHandler(void *arg) {
-    if (gpio_get_level(BTN_MODE) == 0) {
+    if (gpio_get_level(dht_btn) == 0) {
         evt = esp_timer_get_time();
         xQueueSendFromISR(gpio_evt_queue, &evt, NULL);
     }
@@ -249,7 +244,7 @@ static void uuid_set_blinker(void *arg) {
 static void gpio_event_task(void *arg) {
     int64_t evt_time;
     for (;;) {
-        if (xQueueReceive(gpio_evt_queue, &evt_time, pdMS_TO_TICKS(1000))) {
+        if (xQueueReceive(gpio_evt_queue, &evt_time, pdMS_TO_TICKS(short_press * 2))) {
             ESP_LOGD(TAG, "button pressed");
             if ((evt_time - latest_btn_event) / 1000 > short_press) {
                 latest_btn_event = evt_time;
@@ -296,21 +291,23 @@ void app_main() {
     ESP_ERROR_CHECK(gpio_config(&conf));
     gpio_set_level(BUILTIN_LED, 1);
     bool gpioFound = false;
-    for (int sensorIdx = 0; !gpioFound && sensorIdx < sizeof(dht_gpio_arr) / sizeof(gpio_num_t); sensorIdx++) {
-        dht_gpio = dht_gpio_arr[sensorIdx];
-        ESP_LOGI(TAG, "reading GPIO %d", dht_gpio);
-        ESP_ERROR_CHECK(gpio_set_pull_mode(dht_gpio, GPIO_PULLUP_ONLY))
+    for (int sensorIdx = 0; !gpioFound && sensorIdx < sizeof(dht_sensor_arr) / sizeof(gpio_num_t); sensorIdx++) {
+        dht_sensor = dht_sensor_arr[sensorIdx];
+        dht_btn = dht_btn_arr[sensorIdx];
+        ESP_LOGI(TAG, "reading GPIO %d", dht_sensor);
+        ESP_ERROR_CHECK(gpio_set_pull_mode(dht_sensor, GPIO_PULLUP_ONLY))
         int16_t humidity, temperature;
         for (int try = 0; try < 3 && !gpioFound; try++) {
-            if (dht_read_data(sensor_type, dht_gpio, &humidity, &temperature) == ESP_OK) {
-                ESP_LOGI(TAG, "found DHT GPIO %d", dht_gpio);
+            if (dht_read_data(sensor_type, dht_sensor, &humidity, &temperature) == ESP_OK) {
+                ESP_LOGI(TAG, "found DHT GPIO %d", dht_sensor);
+                ESP_LOGI(TAG, "found BTN GPIO %d", dht_btn);
                 gpioFound = true;
                 ESP_LOGI(TAG, "Humidity: %d%% Temp: %dC", humidity / 10, temperature / 10);
                 gpio_set_level(BUILTIN_LED, 0);
                 sleep(1);
                 gpio_set_level(BUILTIN_LED, 1);
             } else {
-                ESP_LOGW(TAG, "can't read GPIO %d, sleeping", dht_gpio);
+                ESP_LOGW(TAG, "can't read GPIO %d, sleeping", dht_sensor);
                 sleep(2);
             }
         }
@@ -322,8 +319,8 @@ void app_main() {
         display_error();
     }
 
-    gpio_set_pull_mode(BTN_MODE, GPIO_PULLUP_ONLY);
-    if (gpio_get_level(BTN_MODE) == 0) {
+    gpio_set_pull_mode(dht_btn, GPIO_PULLUP_ONLY);
+    if (gpio_get_level(dht_btn) == 0) {
         if (startAp(&app_config) != 0) {
             display_error();
         }
@@ -332,7 +329,7 @@ void app_main() {
         read_dht_mainloop();
     }
 
-    gpio_set_intr_type(BTN_MODE, GPIO_INTR_LOW_LEVEL);
+    gpio_set_intr_type(dht_sensor, GPIO_INTR_LOW_LEVEL);
     // create a queue to process GPIO tasks
     gpio_evt_queue = xQueueCreate(5, sizeof(uint32_t));
     // poll events from the gpio_evt_queue and run processing outside of the IRQ event loop.
@@ -341,5 +338,5 @@ void app_main() {
     // Register IRQ for the control button press events
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
 
-    gpio_isr_handler_add(BTN_MODE, &btnPressHandler, NULL);
+    gpio_isr_handler_add(dht_sensor, &btnPressHandler, NULL);
 }
