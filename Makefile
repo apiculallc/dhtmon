@@ -1,7 +1,7 @@
 #V := 1
 PROJECT_NAME := temphumid-sensor
 
-EXTRA_COMPONENT_DIRS := $(CURDIR)/../esp-idf-lib/components
+EXTRA_COMPONENT_DIRS := $(CURDIR)/esp-idf-lib/components
 EXCLUDE_COMPONENTS := max7219 mcp23x17 led_strip max31865 ls7366r ads111x ads130e08 max31855
 
 nvs.bin: nvs.csv web/index.html web/done.html
