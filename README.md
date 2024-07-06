@@ -32,13 +32,16 @@ Clone the repository as `git clone --recurse-submodules -j8 git://github.com/api
 
 ### Deployment
 
-With use of Docker compose everything shall be straightforward:
+With use of [Docker Compose](https://docs.docker.com/compose/) everything shall be straightforward:
 
 ```bash
 docker-compose up -d
 ```
 
 That should create all the necessary pieces
+
+For step-by-step instructions please read below.
+
 #### Start Mosquitto
 
 Create a config file `mosquitto.conf` with the content:
@@ -156,7 +159,7 @@ mqtt-shell -b mqtt://127.0.0.1:1883
 This indicates that sensors actually transmits data.
 
 To verify that we actually receive something in the database ( InfluxDB ) we need to connect to the DB and run a few queries. As we have the installation that exposes ports 8086 - we can simply open [http://127.0.0.1:8086](http://127.0.0.1:8086) and use login  `admin` and password `admin123456` to peek into the storage.  Choose `Buckets` and select `dhtmon`:
-![[explorer.png]]
+![explore](https://raw.githubusercontent.com/apiculallc/dhtmon/main/explorer.png)
 
 From here, you may want to configure Grafana.
 
@@ -197,7 +200,7 @@ Successfully connected to mqtt broker.
 
 The result can look like:
 
-![[dashboard.png]]
+![Dashboard](https://github.com/apiculallc/dhtmon/blob/main/dashboard.png)
 After you run that for some time, the result will be much more interesting:
 
-![[dashboard-30days.png]]
+![Dashboard 30 days](https://raw.githubusercontent.com/apiculallc/dhtmon/main/dashboard-30days.png)
