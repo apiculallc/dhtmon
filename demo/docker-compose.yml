@@ -1,0 +1,69 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=admin123456
+      - DOCKER_INFLUXDB_INIT_ORG=home
+      - DOCKER_INFLUXDB_INIT_BUCKET=dhtmon
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=token123456
+    volumes:
+      - influxdb_data:/var/lib/influxdb
+      - influxdb_conf:/etc/influxdb2
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.0.10
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+    depends_on:
+      - influxdb
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/:/etc/grafana/provisioning/
+      - ./grafana/dashboards/:/var/lib/grafana/dashboards/
+    links:
+      - influxdb
+    restart: unless-stopped
+
+  dht_hub:
+    build:
+      context: ../go
+    container_name: dht_hub
+    depends_on:
+      - mosquitto
+      - influxdb
+    links:
+      - mosquitto
+      - influxdb
+    environment:
+      - "APP_MQTT_BROKER=mqtt://mosquitto:1883"
+      - "INFLUX_DB=http://influxdb:8086"
+      - INFLUX_TOKEN=token123456
+    restart: unless-stopped
+
+volumes:
+  mosquitto_data:
+  mosquitto_config:
+  influxdb_data:
+  influxdb_conf:
+  grafana_data:
