@@ -9,6 +9,24 @@ To create a small, contained and "offline" temperature / humidity monitoring sys
 - [ESP-IDF toolkit](https://docs.espressif.com/projects/esp8266-rtos-sdk/en/latest/)
 - Docker
 
+### Hardware / BOM
+
+| Part | Quantity | Price ( approx ) | Link |
+|------|----------|------------------|--|
+| ESP8266 | 1        | $ 1.20           | https://www.ebay.com/itm/185185809189?var=692941428853 |
+| DHT22/AM2302 | 1        | $ 3.33           | https://www.amazon.com/gp/product/B08TGQY64D/ref=ppx_yo_dt_b_search_asin_title?ie=UTF8&th=1 |
+| AMS1117 | 1 | $ 0.35           | https://www.amazon.com/gp/product/B08CDMZMDN/ref=ppx_yo_dt_b_search_asin_title?ie=UTF8&psc=1 |
+|  Capacitor 10mF | 1 |  $ 0.03  | https://www.amazon.com/gp/product/B087785H1J/ref=ppx_yo_dt_b_search_asin_title?ie=UTF8&psc=1 |
+| USB 2.0 Type A Male Socket Connector Jack Port | 1 |  $ 0.11  | https://www.amazon.com/gp/product/B07QY6GJ6M/ref=ppx_yo_dt_b_search_asin_title?ie=UTF8&th=1 |
+| Push button 6mm | 1 |  $ 0.07  | https://www.ebay.com/itm/312535619242 |
+| SMD Resistor 10kOhm | 4 |  $ 0.03  | https://www.ebay.com/itm/163584740236 |
+| PCB | 1 |  $ 2.57  | https://oshpark.com/ |
+
+
+### Total: ~$8 per board
+
+#### You can also order the board at our blog at https://www.apicula.com/blog/monitoring-temperature-and-humidity-in-unoccupied-zones/
+
 ## Build
 
 Clone the repository as `git clone --recurse-submodules -j8 git://github.com/apiculallc/dht.git`
